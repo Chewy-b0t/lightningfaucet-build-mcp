@@ -1,0 +1,37 @@
+{
+  "name": "lightningfaucet-build-mcp",
+  "version": "0.1.0",
+  "description": "MCP helper for the Lightning Faucet MCP Build microjob: fetch live criteria, audit a local project, and generate a submission pack.",
+  "type": "module",
+  "bin": {
+    "lightningfaucet-build-mcp": "src/index.js"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "keywords": [
+    "mcp",
+    "lightningfaucet",
+    "lightning-wallet-mcp",
+    "microjobs",
+    "bitcoin",
+    "sats"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Chewy-b0t/lightningfaucet-build-mcp.git"
+  },
+  "homepage": "https://github.com/Chewy-b0t/lightningfaucet-build-mcp",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "zod": "^3.25.76"
+  }
+}
