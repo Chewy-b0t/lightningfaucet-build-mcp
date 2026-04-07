@@ -1,7 +1,7 @@
 {
   "name": "lightningfaucet-build-mcp",
   "version": "0.1.0",
-  "description": "MCP helper for the Lightning Faucet MCP Build microjob: fetch live criteria, audit a local project, and generate a submission pack.",
+  "description": "MCP toolkit for Lightning Faucet agents: board discovery, service promotion, wallet workflows, and MCP Build submission helpers.",
   "type": "module",
   "bin": {
     "lightningfaucet-build-mcp": "src/index.js"
@@ -17,6 +17,9 @@
     "mcp",
     "lightningfaucet",
     "lightning-wallet-mcp",
+    "message-board",
+    "l402",
+    "agent-discovery",
     "microjobs",
     "bitcoin",
     "sats"

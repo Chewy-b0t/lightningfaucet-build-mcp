@@ -11,6 +11,7 @@ import { z } from "zod";
 
 const TIPS_URL = "https://lightningfaucet.com/earn/microjobs/tips/";
 const DOCS_URL = "https://lightningfaucet.com/ai-agents/docs/";
+const AGENT_API_URL = "https://lightningfaucet.com/ai-agents/api";
 const PACKAGE_URL = "https://www.npmjs.com/package/lightning-wallet-mcp";
 const REPO_URL = "https://github.com/lightningfaucet/lightning-wallet-mcp";
 const execFileAsync = promisify(execFile);
@@ -310,6 +311,226 @@ ${configSnippet}
 `;
 }
 
+function unique(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function truncateText(text, maxLength = 180) {
+  if (!text) return "";
+  return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1).trimEnd()}...`;
+}
+
+function extractUrls(text) {
+  return unique((text.match(/https?:\/\/[^\s)]+/g) ?? []).map((url) => url.replace(/[.,;!?]+$/, "")));
+}
+
+function extractNpmPackages(text) {
+  const matches = [...text.matchAll(/npm:\s*([@a-z0-9][\w./-]*)/gi)].map((match) => match[1]);
+  return unique(matches);
+}
+
+function classifyBoardPost(post) {
+  const content = post.content ?? "";
+  const topic = post.topic ?? "";
+  const haystack = `${content} ${topic}`.toLowerCase();
+  const urls = extractUrls(content);
+  const npmPackages = extractNpmPackages(content);
+
+  const resourceTypes = [];
+  if (/mcp/.test(haystack)) resourceTypes.push("mcp");
+  if (/l402|x402|paid api|lightning api/.test(haystack)) resourceTypes.push("paid_api");
+  if (/webhook/.test(haystack)) resourceTypes.push("webhook");
+  if (/agent/.test(haystack)) resourceTypes.push("agent_workflow");
+  if (npmPackages.length > 0 || urls.some((url) => url.includes("npmjs.com"))) resourceTypes.push("npm_package");
+  if (urls.some((url) => url.includes("github.com"))) resourceTypes.push("github_repo");
+  if (urls.some((url) => /docs|readme|guide/i.test(url))) resourceTypes.push("documentation");
+
+  const monetizationSignals = [];
+  if (/l402|x402|paid api|sats|zap|tips|invoice/.test(haystack)) monetizationSignals.push("sats_payments");
+  if (/mcp|npm|install|github/.test(haystack)) monetizationSignals.push("developer_distribution");
+  if (/service|tool|agent|automation|api/.test(haystack)) monetizationSignals.push("service_listing");
+  if (/spotlight|launch|release|shipping|now live/.test(haystack)) monetizationSignals.push("promotion_ready");
+
+  const opportunityScore =
+    (post.score ?? 0) * 3 +
+    (post.paid_score ?? 0) * 6 +
+    (post.reply_count ?? 0) * 2 +
+    resourceTypes.length * 4 +
+    monetizationSignals.length * 3 +
+    urls.length * 2;
+
+  return {
+    post_id: post.id,
+    agent_name: post.agent_name ?? post.author_name ?? null,
+    topic: post.topic ?? null,
+    score: post.score ?? 0,
+    paid_score: post.paid_score ?? 0,
+    reply_count: post.reply_count ?? post.replies ?? 0,
+    created_at: post.created_at ?? null,
+    time_ago: post.time_ago ?? null,
+    preview: truncateText(content),
+    urls,
+    npm_packages: npmPackages,
+    resource_types: unique(resourceTypes),
+    monetization_signals: unique(monetizationSignals),
+    opportunity_score: opportunityScore,
+  };
+}
+
+function summarizeTopics(posts) {
+  const counts = new Map();
+  for (const post of posts) {
+    const topic = post.topic ?? "general";
+    counts.set(topic, (counts.get(topic) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .map(([topic, count]) => ({ topic, count }))
+    .sort((a, b) => b.count - a.count);
+}
+
+function resolveAgentApiKey(explicitApiKey) {
+  if (explicitApiKey) return explicitApiKey;
+  if (process.env.LIGHTNING_AGENT_API_KEY) return process.env.LIGHTNING_AGENT_API_KEY;
+  if (process.env.LIGHTNING_WALLET_API_KEY?.startsWith("agent_")) return process.env.LIGHTNING_WALLET_API_KEY;
+  return null;
+}
+
+async function callAgentApi(action, payload = {}, options = {}) {
+  const headers = {
+    "content-type": "application/json",
+    "user-agent": "lightningfaucet-build-mcp/0.1.0",
+    accept: "application/json,text/plain;q=0.9,*/*;q=0.8",
+  };
+
+  const apiKey = resolveAgentApiKey(options.apiKey);
+  if (apiKey) headers["x-api-key"] = apiKey;
+  if (options.requireApiKey && !apiKey) {
+    throw new Error("No agent API key found. Set LIGHTNING_AGENT_API_KEY or LIGHTNING_WALLET_API_KEY to an agent_* key.");
+  }
+
+  const response = await fetch(AGENT_API_URL, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ action, ...payload }),
+  });
+
+  const rawText = await response.text();
+  let data;
+  try {
+    data = JSON.parse(rawText);
+  } catch {
+    throw new Error(`Agent API returned non-JSON response (${response.status}): ${truncateText(rawText, 240)}`);
+  }
+
+  const ok = response.ok && data.success !== false && data.ok !== false;
+  if (!ok) {
+    throw new Error(data.error || data.message || `Agent API error for ${action}`);
+  }
+
+  return data;
+}
+
+async function boardRead(options = {}) {
+  const { sort = "trending", topic = undefined, limit = 20, offset = 0 } = options;
+  return await callAgentApi("board_read", { sort, topic, limit, offset });
+}
+
+async function buildBoardDigest(options = {}) {
+  const sorts = options.sorts?.length ? unique(options.sorts) : ["trending", "newest", "top"];
+  const responses = await Promise.all(
+    sorts.map(async (sort) => ({
+      sort,
+      data: await boardRead({
+        sort,
+        topic: options.topic,
+        limit: options.limitPerSort ?? 5,
+        offset: 0,
+      }),
+    }))
+  );
+
+  const posts = unique(
+    responses
+      .flatMap((entry) => entry.data.posts ?? [])
+      .map((post) => JSON.stringify(post))
+  ).map((post) => JSON.parse(post));
+
+  const classified = posts.map(classifyBoardPost).sort((a, b) => b.opportunity_score - a.opportunity_score);
+
+  return {
+    fetched_sorts: sorts,
+    topic_filter: options.topic ?? null,
+    total_unique_posts: posts.length,
+    top_topics: summarizeTopics(posts).slice(0, 8),
+    highest_signal_posts: classified.slice(0, 10),
+  };
+}
+
+async function extractBoardResources(options = {}) {
+  const sort = options.sort ?? "trending";
+  const board = await boardRead({
+    sort,
+    topic: options.topic,
+    limit: options.limit ?? 20,
+    offset: options.offset ?? 0,
+  });
+
+  const candidates = (board.posts ?? [])
+    .map(classifyBoardPost)
+    .filter((post) => {
+      if (options.keyword) {
+        const needle = options.keyword.toLowerCase();
+        const haystack = `${post.preview} ${post.topic ?? ""} ${post.urls.join(" ")} ${post.npm_packages.join(" ")}`.toLowerCase();
+        if (!haystack.includes(needle)) return false;
+      }
+      return post.resource_types.length > 0 || post.monetization_signals.length > 0;
+    })
+    .sort((a, b) => b.opportunity_score - a.opportunity_score);
+
+  return {
+    sort,
+    topic_filter: options.topic ?? null,
+    keyword_filter: options.keyword ?? null,
+    total_posts_scanned: board.posts?.length ?? 0,
+    candidates,
+  };
+}
+
+function generateServicePost(input) {
+  const topic = input.topic ?? "spotlight";
+  const sentences = [];
+  sentences.push(`${input.serviceName}: ${input.summary}`);
+
+  if (input.serviceType === "mcp") {
+    sentences.push("Installable MCP server for AI agents.");
+  } else if (input.serviceType === "api") {
+    sentences.push("API for agent workflows.");
+  } else if (input.serviceType === "agent") {
+    sentences.push("Agent automation service.");
+  } else {
+    sentences.push("Tooling for AI-agent operators.");
+  }
+
+  if (input.repoUrl) sentences.push(`GitHub: ${input.repoUrl}`);
+  if (input.packageUrl) sentences.push(`npm: ${input.packageUrl}`);
+  if (input.endpointUrl) sentences.push(`Endpoint: ${input.endpointUrl}`);
+  if (input.pricingModel) sentences.push(`Monetization: ${input.pricingModel}`);
+  if (input.callToAction) sentences.push(input.callToAction);
+
+  const content = sentences.join(" ").trim();
+
+  return {
+    topic,
+    content,
+    char_count: content.length,
+    monetization_note:
+      input.pricingModel || input.endpointUrl
+        ? "This post can drive traffic to a paid API or installable package."
+        : "Add an endpoint or pricing model if you want the board post to funnel users toward a sats-paying service.",
+  };
+}
+
 function parseJsonOutput(stdout) {
   try {
     return JSON.parse(stdout);
@@ -486,6 +707,137 @@ server.registerTool(
       {
         type: "text",
         text: JSON.stringify(await runLw("transactions", ["--limit", String(limit), "--offset", String(offset)]), null, 2),
+      },
+    ],
+  })
+);
+
+server.registerTool(
+  "board_read",
+  {
+    description: "Browse the Lightning Faucet AI message board. This is free and does not require an API key.",
+    inputSchema: {
+      sort: z.enum(["trending", "newest", "top"]).optional().describe("Sort order."),
+      topic: z.string().optional().describe("Optional topic filter."),
+      limit: z.number().int().min(1).max(50).optional().describe("How many posts to fetch."),
+      offset: z.number().int().min(0).optional().describe("Pagination offset."),
+    },
+  },
+  async ({ sort = "trending", topic, limit = 20, offset = 0 }) => ({
+    content: [{ type: "text", text: JSON.stringify(await boardRead({ sort, topic, limit, offset }), null, 2) }],
+  })
+);
+
+server.registerTool(
+  "board_digest",
+  {
+    description: "Build a high-signal digest from the Lightning Faucet AI message board across trending, newest, and top posts.",
+    inputSchema: {
+      topic: z.string().optional().describe("Optional topic filter."),
+      limitPerSort: z.number().int().min(1).max(20).optional().describe("Posts to fetch from each sort."),
+      sorts: z.array(z.enum(["trending", "newest", "top"])).optional().describe("Optional sorts to include."),
+    },
+  },
+  async ({ topic, limitPerSort = 5, sorts }) => ({
+    content: [{ type: "text", text: JSON.stringify(await buildBoardDigest({ topic, limitPerSort, sorts }), null, 2) }],
+  })
+);
+
+server.registerTool(
+  "board_extract_resources",
+  {
+    description: "Scan board posts and extract MCP servers, paid APIs, GitHub repos, npm packages, and other high-signal resources for agents.",
+    inputSchema: {
+      sort: z.enum(["trending", "newest", "top"]).optional().describe("Sort order."),
+      topic: z.string().optional().describe("Optional topic filter."),
+      keyword: z.string().optional().describe("Optional keyword filter applied after extraction."),
+      limit: z.number().int().min(1).max(50).optional().describe("How many posts to scan."),
+      offset: z.number().int().min(0).optional().describe("Pagination offset."),
+    },
+  },
+  async ({ sort = "trending", topic, keyword, limit = 20, offset = 0 }) => ({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(await extractBoardResources({ sort, topic, keyword, limit, offset }), null, 2),
+      },
+    ],
+  })
+);
+
+server.registerTool(
+  "board_generate_service_post",
+  {
+    description: "Generate a concise board post to promote an MCP server, API, or agent service and drive traffic toward a sats-paying offer.",
+    inputSchema: {
+      serviceName: z.string().describe("Name of the service, package, or API."),
+      summary: z.string().describe("One-sentence value proposition."),
+      serviceType: z.enum(["mcp", "api", "agent", "tool"]).optional().describe("What kind of service this is."),
+      repoUrl: z.string().url().optional().describe("GitHub repo URL."),
+      packageUrl: z.string().url().optional().describe("npm package URL."),
+      endpointUrl: z.string().url().optional().describe("Paid API or service endpoint URL."),
+      pricingModel: z.string().optional().describe("Pricing or monetization details, like 'L402 pay-per-request'."),
+      callToAction: z.string().optional().describe("Short closing line telling agents what to do next."),
+      topic: z.string().optional().describe("Board topic to use."),
+    },
+  },
+  async (input) => ({
+    content: [{ type: "text", text: JSON.stringify(generateServicePost({ serviceType: "mcp", ...input }), null, 2) }],
+  })
+);
+
+server.registerTool(
+  "board_post",
+  {
+    description: "Post to the Lightning Faucet message board. Costs 1 sat and requires an agent API key.",
+    inputSchema: {
+      content: z.string().min(20).max(2000).describe("Post body."),
+      topic: z.string().optional().describe("Optional topic."),
+    },
+  },
+  async ({ content, topic }) => ({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(await callAgentApi("board_post", { content, topic }, { requireApiKey: true }), null, 2),
+      },
+    ],
+  })
+);
+
+server.registerTool(
+  "board_reply",
+  {
+    description: "Reply to a Lightning Faucet message board post. Costs 1 sat and requires an agent API key.",
+    inputSchema: {
+      postId: z.number().int().positive().describe("Post ID to reply to."),
+      content: z.string().min(20).max(2000).describe("Reply content."),
+    },
+  },
+  async ({ postId, content }) => ({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(await callAgentApi("board_reply", { post_id: postId, content }, { requireApiKey: true }), null, 2),
+      },
+    ],
+  })
+);
+
+server.registerTool(
+  "board_vote",
+  {
+    description: "Upvote or downvote a board post. Costs 1 sat and requires an agent API key.",
+    inputSchema: {
+      postId: z.number().int().positive().describe("Post ID to vote on."),
+      direction: z.enum(["up", "down"]).describe("Vote direction."),
+    },
+  },
+  async ({ postId, direction }) => ({
+    content: [
+      {
+        type: "text",
+        text: JSON.stringify(await callAgentApi("board_vote", { post_id: postId, direction }, { requireApiKey: true }), null, 2),
       },
     ],
   })
